@@ -1,14 +1,26 @@
+import os
 import requests
 from flask import Flask, render_template_string, request, redirect, url_for
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import inspect
 from datetime import datetime, date, timedelta
 from pathlib import Path
 import re
 
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///leave.db'
-app.config['SECRET_KEY'] = 'surat3_leave_system'
+
+database_url = os.environ.get("DATABASE_URL", "sqlite:///leave.db")
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    "pool_pre_ping": True,
+    "pool_recycle": 300,
+}
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'surat3_leave_system')
 db = SQLAlchemy(app)
 
 class LeaveRequest(db.Model):
@@ -23,6 +35,7 @@ class LeaveRequest(db.Model):
     phone = db.Column(db.String(20), nullable=False)
     leave_address = db.Column(db.String(300), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 class LateRecord(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     teacher_name = db.Column(db.String(100), nullable=False)
@@ -31,58 +44,37 @@ class LateRecord(db.Model):
 
 with app.app_context():
     db.create_all()
-    with db.engine.begin() as conn:
-        columns = [
-            row[1]
-            for row in conn.exec_driver_sql(
-                "PRAGMA table_info(leave_request)"
-            ).fetchall()
-        ]
-
-        if "leave_address" not in columns:
+    inspector = inspect(db.engine)
+    columns = [col["name"] for col in inspector.get_columns("leave_request")]
+    if "leave_address" not in columns:
+        with db.engine.begin() as conn:
             conn.exec_driver_sql(
                 "ALTER TABLE leave_request ADD COLUMN leave_address VARCHAR(300)"
             )
 
 def parse_days(value):
-
     """แปลงข้อความ เช่น '1 วัน' หรือ '0.5' เป็นตัวเลข"""
-
     match = re.search(r"\d+(?:[.,]\d+)?", str(value or ""))
-
     return float(match.group(0).replace(",", ".")) if match else 0.0
 
 
-
 def current_half_year(today=None):
-
     """รอบครึ่งปี: 1 ต.ค.–31 มี.ค. และ 1 เม.ย.–30 ก.ย."""
-
     today = today or date.today()
 
-
     if today.month >= 10:
-
         start = date(today.year, 10, 1)
-
         end = date(today.year + 1, 3, 31)
-
     elif today.month >= 4:
-
         start = date(today.year, 4, 1)
-
         end = date(today.year, 9, 30)
-
     else:
-
         start = date(today.year - 1, 10, 1)
-
         end = date(today.year, 3, 31)
 
-
     label = f"{start.strftime('%d/%m/%Y')} – {end.strftime('%d/%m/%Y')}"
-
     return start, end, label
+
 def build_leave_summary(leaves, late_records, period_start, period_end):
     people = {}
 
@@ -141,57 +133,58 @@ def build_leave_summary(leaves, late_records, period_start, period_end):
         )
 
     return sorted(people.values(), key=lambda item: item["name"])
+
 HOLIDAY_FILE = Path(__file__).with_name("holidays.txt")
 
 
-
 def load_holidays():
-       """อ่านวันหยุดจากไฟล์ holidays.txt"""
-       if not HOLIDAY_FILE.exists():
-           return set()
+    """อ่านวันหยุดจากไฟล์ holidays.txt"""
+    if not HOLIDAY_FILE.exists():
+        return set()
 
-       holidays = set()
-       for line in HOLIDAY_FILE.read_text(encoding="utf-8").splitlines():
-           value = line.strip()
-           if not value or value.startswith("#"):
-               continue
-           try:
-               holidays.add(date.fromisoformat(value))
-           except ValueError:
-               app.logger.warning("ข้ามวันที่วันหยุดที่ไม่ถูกต้อง: %s", value)
-       return holidays
+    holidays = set()
+    for line in HOLIDAY_FILE.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        try:
+            holidays.add(date.fromisoformat(value))
+        except ValueError:
+            app.logger.warning("ข้ามวันที่วันหยุดที่ไม่ถูกต้อง: %s", value)
+    return holidays
 
 
 def calculate_leave_days(start_text, end_text, half_day=False):
-       """นับวันจันทร์–ศุกร์ โดยไม่รวมวันหยุดใน holidays.txt"""
-       try:
-           start = date.fromisoformat(start_text)
-           end = date.fromisoformat(end_text)
-       except (TypeError, ValueError):
-           raise ValueError("กรุณาเลือกวันที่ลาให้ถูกต้อง")
+    """นับวันจันทร์–ศุกร์ โดยไม่รวมวันหยุดใน holidays.txt"""
+    try:
+        start = date.fromisoformat(start_text)
+        end = date.fromisoformat(end_text)
+    except (TypeError, ValueError):
+        raise ValueError("กรุณาเลือกวันที่ลาให้ถูกต้อง")
 
-       if end < start:
-           raise ValueError("วันสิ้นสุดต้องไม่อยู่ก่อนวันเริ่มลา")
+    if end < start:
+        raise ValueError("วันสิ้นสุดต้องไม่อยู่ก่อนวันเริ่มลา")
 
-       holidays = load_holidays()
+    holidays = load_holidays()
 
-       if half_day:
-           if start != end:
-               raise ValueError("ลาครึ่งวันต้องเลือกวันเริ่มและวันสิ้นสุดเป็นวันเดียวกัน")
-           if start.weekday() >= 5 or start in holidays:
-               raise ValueError("วันที่เลือกเป็นวันหยุด จึงใช้ลา 0.5 วันไม่ได้")
-           return 0.5
+    if half_day:
+        if start != end:
+            raise ValueError("ลาครึ่งวันต้องเลือกวันเริ่มและวันสิ้นสุดเป็นวันเดียวกัน")
+        if start.weekday() >= 5 or start in holidays:
+            raise ValueError("วันที่เลือกเป็นวันหยุด จึงใช้ลา 0.5 วันไม่ได้")
+        return 0.5
 
-       total = 0
-       current = start
-       while current <= end:
-           if current.weekday() < 5 and current not in holidays:
-               total += 1
-           current += timedelta(days=1)
+    total = 0
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and current not in holidays:
+            total += 1
+        current += timedelta(days=1)
 
-       if total == 0:
-           raise ValueError("ช่วงวันที่เลือกไม่มีวันทำการ")
-       return float(total)
+    if total == 0:
+        raise ValueError("ช่วงวันที่เลือกไม่มีวันทำการ")
+    return float(total)
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="th">
@@ -407,7 +400,7 @@ HTML_TEMPLATE = """
                                     <option value="ลากิจส่วนตัว">ลากิจส่วนตัว</option>
                                     <option value="ลาป่วย">ลาป่วย</option>
                                     <option value="ลาพักผ่อน">ลาพักผ่อน</option>
-                        <option value="ลาคลอด">ลาคลอด</option>
+                                    <option value="ลาคลอด">ลาคลอด</option>
                                 </select>
                             </div>
                             <div class="row">
@@ -420,30 +413,29 @@ HTML_TEMPLATE = """
                                     <input type="date" class="form-control" name="end_date" required>
                                 </div>
                             </div>
-                           <div class="mb-3">
-                          <label class="form-label fw-bold">ช่วงเวลาการลา</label>
-                                                                  <select class="form-select" name="half_day">
-                                                              <option value="no">ลาเต็มวันหรือหลายวัน</option>
-                                                              <option value="yes">ลาครึ่งวัน (0.5 วัน — เลือกวันเดียว)</option>
-                                                             </select>
-                                                        </div>
+                            <div class="mb-3">
+                                <label class="form-label fw-bold">ช่วงเวลาการลา</label>
+                                <select class="form-select" name="half_day">
+                                    <option value="no">ลาเต็มวันหรือหลายวัน</option>
+                                    <option value="yes">ลาครึ่งวัน (0.5 วัน — เลือกวันเดียว)</option>
+                                </select>
+                            </div>
                             <div class="mb-3">
                                 <label class="form-label fw-bold">เหตุผลการลา</label>
                                 <textarea class="form-control" name="reason" rows="2" required placeholder="ระบุเหตุผลความจำเป็น..."></textarea>
                             </div>
-                     <div class="mb-3">
-                    <label class="form-label fw-bold">ที่อยู่ที่ติดต่อได้ระหว่างลา</label>
-                    <textarea class="form-control" name="leave_address" rows="2" required
-                    placeholder="ระบุที่อยู่ที่สามารถติดต่อได้ระหว่างลา"></textarea>
-                    </div>
-                        <div class="mb-3">
+                            <div class="mb-3">
+                                <label class="form-label fw-bold">ที่อยู่ที่ติดต่อได้ระหว่างลา</label>
+                                <textarea class="form-control" name="leave_address" rows="2" required placeholder="ระบุที่อยู่ที่สามารถติดต่อได้ระหว่างลา"></textarea>
+                            </div>
+                            <div class="mb-3">
                                 <label class="form-label fw-bold">เบอร์โทรศัพท์ที่ติดต่อได้</label>
                                 <input type="text" class="form-control" name="phone" required placeholder="08XXXXXXXX">
                             </div>
                             <button type="submit" class="btn btn-primary w-100 py-2 fw-bold" style="background-color: #0b2f64;">บันทึกข้อมูลและสร้างใบลา</button>
-			<button type="button" class="btn btn-success w-100 mt-2" onclick="copyLeaveText()">
-  คัดลอกข้อความไปวางใน LINE
-</button>
+                            <button type="button" class="btn btn-success w-100 mt-2" onclick="copyLeaveText()">
+                                คัดลอกข้อความไปวางใน LINE
+                            </button>
                         </form>
                     </div>
                 </div>
@@ -467,7 +459,7 @@ HTML_TEMPLATE = """
                                         <th class="text-center">จัดการ</th>
                                     </tr>
                                 </thead>
-				<tbody>
+                                <tbody>
                                     {% for leave in leaves %}
                                     <tr>
                                         <td>{{ leave.teacher_name }}</td>
@@ -477,10 +469,10 @@ HTML_TEMPLATE = """
                                         <td><span class="badge bg-success">{{ leave.total_days }}</span></td>
                                         <td class="text-center">
                                             <a href="/print/{{ leave.id }}" class="btn btn-sm btn-outline-primary fw-bold">📄 พิมพ์ใบลา</a>
-<form action="/delete/{{ leave.id }}" method="POST" style="display:inline;"
-      onsubmit="return confirm('ยืนยันว่าต้องการลบรายการนี้หรือไม่?');">
-    <button type="submit" class="btn btn-sm btn-danger">ลบ</button>
-</form>
+                                            <form action="/delete/{{ leave.id }}" method="POST" style="display:inline;"
+                                                  onsubmit="return confirm('ยืนยันว่าต้องการลบรายการนี้หรือไม่?');">
+                                                <button type="submit" class="btn btn-sm btn-danger">ลบ</button>
+                                            </form>
                                         </td>
                                     </tr>
                                     {% else %}
@@ -497,99 +489,98 @@ HTML_TEMPLATE = """
         </div>
         {% endif %}
     </div>
-    </div>
-    
 
     <script>
     async function copyLeaveText() {
-  const value = (name) =>
-    document.querySelector('[name="' + name + '"]')?.value?.trim() || "-";
+        const value = (name) =>
+            document.querySelector('[name="' + name + '"]')?.value?.trim() || "-";
 
-  const message = [
-    "ใบลา",
-    "ชื่อ: " + value("teacher_name"),
-    "ตำแหน่ง: " + value("position"),
-    "ประเภทการลา: " + value("leave_type"),
-    "วันที่ลา: " + value("start_date") + " ถึง " + value("end_date"),
-    "เหตุผล: " + value("reason"),
-    "เบอร์ติดต่อ: " + value("phone")
-  ].join("\\n");
+        const message = [
+            "ใบลา",
+            "ชื่อ: " + value("teacher_name"),
+            "ตำแหน่ง: " + value("position"),
+            "ประเภทการลา: " + value("leave_type"),
+            "วันที่ลา: " + value("start_date") + " ถึง " + value("end_date"),
+            "เหตุผล: " + value("reason"),
+            "เบอร์ติดต่อ: " + value("phone")
+        ].join("\\n");
 
-  try {
-    await navigator.clipboard.writeText(message);
-    alert("คัดลอกแล้ว ไปที่ LINE แล้วกด Ctrl+V");
-  } catch (error) {
-    const box = document.createElement("textarea");
-    box.value = message;
-    document.body.appendChild(box);
-    box.select();
-    const copied = document.execCommand("copy");
-    box.remove();
+        try {
+            await navigator.clipboard.writeText(message);
+            alert("คัดลอกแล้ว ไปที่ LINE แล้วกด Ctrl+V");
+        } catch (error) {
+            const box = document.createElement("textarea");
+            box.value = message;
+            document.body.appendChild(box);
+            box.select();
+            const copied = document.execCommand("copy");
+            box.remove();
 
-    if (copied) {
-      alert("คัดลอกแล้ว ไปที่ LINE แล้วกด Ctrl+V");
-    } else {
-      alert("คัดลอกไม่สำเร็จ กรุณาลองเปิดเว็บผ่าน http://127.0.0.1:5000");
+            if (copied) {
+                alert("คัดลอกแล้ว ไปที่ LINE แล้วกด Ctrl+V");
+            } else {
+                alert("คัดลอกไม่สำเร็จ กรุณาลองเปิดเว็บผ่าน http://127.0.0.1:5000");
+            }
+        }
     }
-  }
-}
     </script>
 
 </body>
 </html>
 """
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
-        if request.method == 'POST':
-            calculated_days = calculate_leave_days(
-                request.form['start_date'],
-                request.form['end_date'],
-                half_day=request.form.get('half_day') == 'yes'
+    if request.method == 'POST':
+        calculated_days = calculate_leave_days(
+            request.form['start_date'],
+            request.form['end_date'],
+            half_day=request.form.get('half_day') == 'yes'
+        )
+
+        new_leave = LeaveRequest(
+            teacher_name=request.form['teacher_name'],
+            position=request.form['position'],
+            leave_type=request.form['leave_type'],
+            start_date=request.form['start_date'],
+            end_date=request.form['end_date'],
+            total_days=f"{calculated_days:g} วัน",
+            reason=request.form['reason'],
+            phone=request.form['phone'],
+            leave_address=request.form['leave_address']
+        )
+        db.session.add(new_leave)
+        db.session.commit()
+
+        payload = {
+            "action": "create",
+            "id": new_leave.id,
+            "teacher_name": new_leave.teacher_name,
+            "position": new_leave.position,
+            "leave_type": new_leave.leave_type,
+            "start_date": new_leave.start_date,
+            "end_date": new_leave.end_date,
+            "total_days": new_leave.total_days,
+            "reason": new_leave.reason,
+            "phone": new_leave.phone,
+            "leave_address": new_leave.leave_address,
+            "token": "Ab7xQ9mL2vR4pT8kN6cW3yH5sJ1fD0aZ",
+            "created_at": new_leave.created_at.isoformat()
+        }
+
+        try:
+            response = requests.post(
+                "https://script.google.com/macros/s/AKfycbxxvbcBGhBBNf6j6RBPKg_KTGAGXUefW9shB19-RaR6hayA5uwGPChQdJBcG4ikwijrYw/exec",
+                json=payload,
+                timeout=10
             )
+            response.raise_for_status()
+        except requests.RequestException:
+            app.logger.exception("ส่งข้อมูลไป Google Sheets ไม่สำเร็จ")
 
-            new_leave = LeaveRequest(
-                teacher_name=request.form['teacher_name'],
-                position=request.form['position'],
-                leave_type=request.form['leave_type'],
-                start_date=request.form['start_date'],
-                end_date=request.form['end_date'],
-                total_days=f"{calculated_days:g} วัน",
-                reason=request.form['reason'],
-                phone=request.form['phone'],
-                leave_address=request.form['leave_address']
-            )
-            db.session.add(new_leave)
-            db.session.commit()
-
-            payload = {
-                "action": "create",
-                "id": new_leave.id,
-                "teacher_name": new_leave.teacher_name,
-                "position": new_leave.position,
-                "leave_type": new_leave.leave_type,
-                "start_date": new_leave.start_date,
-                "end_date": new_leave.end_date,
-                "total_days": new_leave.total_days,
-                "reason": new_leave.reason,
-                "phone": new_leave.phone,
-                "leave_address": new_leave.leave_address,
-                "token": "Ab7xQ9mL2vR4pT8kN6cW3yH5sJ1fD0aZ",
-                "created_at": new_leave.created_at.isoformat()
-            }
-
-            try:
-                response = requests.post(
-                    "https://script.google.com/macros/s/AKfycbxxvbcBGhBBNf6j6RBPKg_KTGAGXUefW9shB19-RaR6hayA5uwGPChQdJBcG4ikwijrYw/exec",
-                    json=payload,
-                    timeout=10
-                )
-                response.raise_for_status()
-            except requests.RequestException:
-                app.logger.exception("ส่งข้อมูลไป Google Sheets ไม่สำเร็จ")
-
-            return redirect(url_for('index'))
-        leaves = LeaveRequest.query.order_by(LeaveRequest.id.desc()).all()
-        return render_template_string(HTML_TEMPLATE, leaves=leaves, print_mode=False)
+        return redirect(url_for('index'))
+    leaves = LeaveRequest.query.order_by(LeaveRequest.id.desc()).all()
+    return render_template_string(HTML_TEMPLATE, leaves=leaves, print_mode=False)
 
 @app.route('/print/<int:id>')
 def print_leave(id):
@@ -626,6 +617,7 @@ def print_leave(id):
         total_personal_days=total_personal_days,
         total_sick_days=total_sick_days
     )
+
 @app.route('/delete/<int:id>', methods=['POST'])
 def delete_leave(id):
     leave = LeaveRequest.query.get_or_404(id)
@@ -652,6 +644,7 @@ def delete_leave(id):
     db.session.delete(leave)
     db.session.commit()
     return redirect(url_for('index'))
+
 @app.route('/monthly-leave-report')
 def monthly_leave_report():
     today = date.today()
@@ -767,7 +760,8 @@ th:nth-child(4), td:nth-child(4) { width: 12%; }
 th:nth-child(5), td:nth-child(5) { width: 12%; }
 th:nth-child(6), td:nth-child(6) { width: 12%; }
 th:nth-child(7), td:nth-child(7) { width: 7%; text-align: center; }
-th:nth-child(8), td:nth-child(8) { width: 21%; }</style>
+th:nth-child(8), td:nth-child(8) { width: 21%; }
+        </style>
     </head>
     <body>
         <h2>รายงานการลาประจำเดือน</h2>
@@ -775,76 +769,4 @@ th:nth-child(8), td:nth-child(8) { width: 21%; }</style>
 
         <div class="controls no-print">
             <form method="get">
-                <label>เลือกเดือน:
-                    <input type="month" name="month" value="{{ month_value }}">
-                </label>
-                <button type="submit">แสดงรายงาน</button>
-                <button type="button" onclick="window.print()">พิมพ์รายงาน</button>
-                <a href="/">กลับหน้าหลัก</a>
-            </form>
-        </div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>ลำดับ</th>
-                    <th>ชื่อ–สกุล</th>
-                    <th>ตำแหน่ง</th>
-                    <th>ประเภทการลา</th>
-                    <th>วันที่เริ่มลา</th>
-                    <th>วันที่สิ้นสุด</th>
-                    <th>จำนวนวัน</th>
-                    <th>เหตุผล</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for leave in leaves %}
-                <tr>
-                    <td>{{ loop.index }}</td>
-                    <td>{{ leave.teacher_name }}</td>
-                    <td>{{ leave.position }}</td>
-                    <td>{{ leave.leave_type }}</td>
-                    <td>{{ leave.start_date }}</td>
-                    <td>{{ leave.end_date }}</td>
-                    <td>{{ leave.total_days }}</td>
-                    <td>{{ leave.reason }}</td>
-                </tr>
-                {% else %}
-                <tr>
-                    <td colspan="8" style="text-align:center;">
-                        ไม่มีรายการลาในเดือนที่เลือก
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-
-     <div class="signatures">
-    <div class="signature">
-        <div>ผู้จัดทำรายงาน</div>
-        <div class="line"></div>
-        <div>(นางกนกวรรณ ศรีสว่าง)</div>
-        <div>หัวหน้างานบุคลากร</div>
-    </div>
-
-    <div class="signature">
-        <div>ผู้ตรวจสอบความถูกต้อง</div>
-        <div class="line"></div>
-        <div>(นางสาวศิริกาญจน์ บุญมาก)</div>
-        <div>รองผู้อำนวยการฝ่ายบริหารงานบุคคล</div>
-    </div>
-
-    <div class="signature">
-        <div>ผู้รับทราบและรับรอง</div>
-        <div class="line"></div>
-        <div>(นางสาวลักขณาวรรณ เพชรรัตน์)</div>
-        <div>ผู้อำนวยการสถานศึกษา</div>
-    </div>
-</div>
-        </div>
-    </body>
-    </html>
-    """, leaves=leaves, month_value=month_value)
-
-if __name__ == '__main__':
-    app.run(debug=False)
+                <label
