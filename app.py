@@ -769,4 +769,75 @@ th:nth-child(8), td:nth-child(8) { width: 21%; }
 
         <div class="controls no-print">
             <form method="get">
-                <label
+                <label>เลือกเดือน:
+                    <input type="month" name="month" value="{{ month_value }}">
+                </label>
+                <button type="submit">แสดงรายงาน</button>
+                <button type="button" onclick="window.print()">พิมพ์รายงาน</button>
+                <a href="/">กลับหน้าหลัก</a>
+            </form>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>ลำดับ</th>
+                    <th>ชื่อ–สกุล</th>
+                    <th>ตำแหน่ง</th>
+                    <th>ประเภทการลา</th>
+                    <th>วันที่เริ่มลา</th>
+                    <th>วันที่สิ้นสุด</th>
+                    <th>จำนวนวัน</th>
+                    <th>เหตุผล</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for leave in leaves %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ leave.teacher_name }}</td>
+                    <td>{{ leave.position }}</td>
+                    <td>{{ leave.leave_type }}</td>
+                    <td>{{ leave.start_date }}</td>
+                    <td>{{ leave.end_date }}</td>
+                    <td>{{ leave.total_days }}</td>
+                    <td>{{ leave.reason }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="8" style="text-align:center;">
+                        ไม่มีรายการลาในเดือนที่เลือก
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="signatures">
+            <div class="signature">
+                <div>ผู้จัดทำรายงาน</div>
+                <div class="line"></div>
+                <div>(นางกนกวรรณ ศรีสว่าง)</div>
+                <div>หัวหน้างานบุคลากร</div>
+            </div>
+
+            <div class="signature">
+                <div>ผู้ตรวจสอบความถูกต้อง</div>
+                <div class="line"></div>
+                <div>(นางสาวศิริกาญจน์ บุญมาก)</div>
+                <div>รองผู้อำนวยการฝ่ายบริหารงานบุคคล</div>
+            </div>
+
+            <div class="signature">
+                <div>ผู้รับทราบและรับรอง</div>
+                <div class="line"></div>
+                <div>(นางสาวลักขณาวรรณ เพชรรัตน์)</div>
+                <div>ผู้อำนวยการสถานศึกษา</div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """, leaves=leaves, month_value=month_value)
+
+if __name__ == '__main__':
+    app.run(debug=False)
