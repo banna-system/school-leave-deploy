@@ -24,6 +24,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     "pool_recycle": 300,
 }
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'surat3_leave_system')
+ADMIN_DELETE_PASSWORD = os.environ.get("ADMIN_DELETE_PASSWORD", "BannaAdmin@2569")
 db = SQLAlchemy(app)
 
 class LeaveRequest(db.Model):
@@ -472,10 +473,10 @@ HTML_TEMPLATE = """
                                         <td><span class="badge bg-success">{{ leave.total_days }}</span></td>
                                         <td class="text-center">
                                             <a href="/print/{{ leave.id }}" class="btn btn-sm btn-outline-primary fw-bold">📄 พิมพ์ใบลา</a>
-                                            <form action="/delete/{{ leave.id }}" method="POST" style="display:inline;"
-                                                  onsubmit="return confirm('ยืนยันว่าต้องการลบรายการนี้หรือไม่?');">
-                                                <button type="submit" class="btn btn-sm btn-danger">ลบ</button>
-                                            </form>
+                                           <button type="button" class="btn btn-sm btn-danger"
+        onclick="confirmDeleteWithPassword({{ leave.id }}, '{{ leave.teacher_name|e }}')">
+    ลบ
+</button>
                                         </td>
                                     </tr>
                                     {% else %}
@@ -526,6 +527,35 @@ HTML_TEMPLATE = """
             }
         }
     }
+    async function confirmDeleteWithPassword(leaveId, teacherName) {
+  const password = prompt("กรุณากรอกรหัสผ่านแอดมินเพื่อยืนยันการลบรายการของ: " + teacherName);
+  if (password === null) {
+    return;
+  }
+  if (!password.trim()) {
+    alert("กรุณากรอกรหัสผ่านก่อนครับ");
+    return;
+  }
+
+  const formData = new URLSearchParams();
+  formData.append("admin_password", password);
+
+  try {
+    const res = await fetch("/delete/" + leaveId, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: formData.toString()
+    });
+    const text = await res.text();
+    if (res.ok) {
+      window.location.reload();
+    } else {
+      alert(text || "รหัสผ่านไม่ถูกต้องหรือไม่สามารถลบได้");
+    }
+  } catch (err) {
+    alert("เกิดข้อผิดพลาดในการเชื่อมต่อระบบ");
+  }
+}
     </script>
 
 </body>
@@ -623,6 +653,9 @@ def print_leave(id):
 
 @app.route('/delete/<int:id>', methods=['POST'])
 def delete_leave(id):
+    entered_password = request.form.get("admin_password", "")
+    if not ADMIN_DELETE_PASSWORD or entered_password != ADMIN_DELETE_PASSWORD:
+        return "รหัสผ่านแอดมินไม่ถูกต้อง ไม่มีสิทธิ์ลบรายการ", 403
     leave = LeaveRequest.query.get_or_404(id)
 
     try:
@@ -646,7 +679,7 @@ def delete_leave(id):
 
     db.session.delete(leave)
     db.session.commit()
-    return redirect(url_for('index'))
+    return "OK", 200
 
 @app.route('/monthly-leave-report')
 def monthly_leave_report():
